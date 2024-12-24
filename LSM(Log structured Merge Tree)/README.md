@@ -1,4 +1,4 @@
-# Log-Structured Merge Tree
+## Log-Structured Merge Tree
 
 LSM tree, short for Log-Structured-Merge Tree, is a clever algorithm design that helps us store massive amounts of data without making us wait forever to write it. It stores data in memory first, which is lightning fast. But since we can’t keep everything in memory, the LSM Tree periodically flushes data to disk.
 
@@ -61,4 +61,23 @@ LSM Trees are a core feature in modern databases like Cassandra, RocksDB, and Le
 
 ![Alt text](image.png)
 
-## Optimisations:
+## Optimizations:
+
+### Summary Tables:
+- Used to provide quick access to metadata about the stored data.
+
+### Bloom Filter:
+- A probabilistic data structure used to quickly check if a key exists in an SSTable, reducing unnecessary disk lookups.
+
+### Sparse Techniques:
+- Storing only a subset of keys for quick indexing, further improving lookup efficiency.
+
+## Compaction Strategies
+
+### Tiering:
+- Write-Optimized.
+- Used by Cassandra.
+
+### Leveling:
+- Read-Optimized.
+- Used by RocksDB.
