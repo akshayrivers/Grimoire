@@ -30,6 +30,77 @@
 
 */
 
+// IMPLEMENTATION OF B TREE
+struct BTree {
+    root: Option<Box<Node>>, // Root of the BTree, could be a leaf or internal node
+    order: usize,            // Order of the BTree (maximum number of children per node)
+}
+
+impl BTree {
+    fn new(order: usize) -> Self {
+        BTree { root: None, order }
+    }
+
+    // Insert function will be implemented here
+    fn insert(&mut self, key: i32, value: i32) {
+        // Implement insertion logic
+    }
+
+    // Search function will be implemented here
+    fn search(&self, key: i32) -> Option<i32> {
+        // Implement search logic
+        None
+    }
+}
+
+// Define Node enum, which can either be a Leaf or Internal Node
+#[derive(Debug)]
+enum Node {
+    InternalNode {
+        keys: Vec<i32>,
+        children: Vec<Box<Node>>,
+    },
+    LeafNode {
+        keys: Vec<i32>,
+        values: Vec<i32>,
+    },
+}
+
+// Helper function to create an InternalNode
+impl Node {
+    fn new_internal_node() -> Self {
+        Node::InternalNode {
+            keys: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
+    // Helper function to create a LeafNode
+    fn new_leaf_node() -> Self {
+        Node::LeafNode {
+            keys: Vec::new(),
+            values: Vec::new(),
+        }
+    }
+}
+
+// a array of length 4 max if it exceed we initialise a new one or we can do it through vector too
+const Max_size: usize = 4;
+#[derive(Debug)]
+struct BPlusTree {
+    root: Option<Box<Node>>,
+}
+
 fn main() {
-    println!("Implementation of basic B+ Tree");
+    let mut tree = BTree::new(3); // A B Tree of order 3
+    tree.insert(10, 100); // Insert key-value pair into the tree
+    tree.insert(20, 200);
+    tree.insert(5, 50);
+
+    // Search for a key in the tree
+    if let Some(value) = tree.search(10) {
+        println!("Found value: {}", value);
+    } else {
+        println!("Value not found.");
+    }
 }
