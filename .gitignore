@@ -6,3 +6,37 @@ huffman_coding/implementation/.DS_Store
 .excalidraw
 
 ./.DS_Store
+
+# Compiled binaries
+
+LockBasedConcurrentDataStructures/counter
+LockBasedConcurrentDataStructures/sloppy_counter
+LockBasedConcurrentDataStructures/simple_counter
+LockBasedConcurrentDataStructures/hand_over_hand
+LockBasedConcurrentDataStructures/measurement
+*.out
+*.exe
+
+# Object files
+*.o
+*.a
+
+# Build directories
+build/
+bin/
+
+# macOS
+.DS_Store
+
+# Logs / experiment output
+*.log
+
+# CSV experiment outputs (optional if you want to regenerate them)
+results/*.csv
+
+# Editor
+.vscode/
+.idea/
+
+# Temporary files
+*~
