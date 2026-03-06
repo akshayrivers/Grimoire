@@ -7,8 +7,6 @@ It contains the following programs and how they are implemented along with their
 1. A simple counter
 2. A lock based counter
 3. A sloppy counter which uses global counter to scale
-
-In Progress:
-
 4. Hand over hand Locking in Linked Lists
-5. Skip Lists
+
+In Progress: 5. Skip Lists

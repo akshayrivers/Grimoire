@@ -14,6 +14,7 @@ LockBasedConcurrentDataStructures/sloppy_counter
 LockBasedConcurrentDataStructures/simple_counter
 LockBasedConcurrentDataStructures/hand_over_hand
 LockBasedConcurrentDataStructures/measurement
+LockBasedConcurrentDataStructures/skip_list
 *.out
 *.exe
 

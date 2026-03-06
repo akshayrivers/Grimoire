@@ -1,0 +1,28 @@
+
+==== Coarse Locking INSERT Benchmark ====
+threads=1 time=0.000830
+threads=2 time=0.001286
+threads=4 time=0.001915
+threads=8 time=0.002615
+threads=16 time=0.003072
+
+==== Fine Locking INSERT Benchmark ====
+threads=1 time=0.820620
+threads=2 time=0.535930
+threads=4 time=0.410387
+threads=8 time=0.694444
+threads=16 time=1.216346
+
+==== Coarse Locking LOOKUP Benchmark ====
+threads=1 time=0.011099
+threads=2 time=0.018232
+threads=4 time=0.025996
+threads=8 time=0.032617
+threads=16 time=0.042980
+
+==== Fine Locking LOOKUP Benchmark ====
+threads=1 time=0.050781
+threads=2 time=0.048155
+threads=4 time=0.061469
+threads=8 time=0.075908
+threads=16 time=0.095586

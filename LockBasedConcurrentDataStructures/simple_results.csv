@@ -1,0 +1,5 @@
+threads=1 counter=1000000 time=0.015257
+threads=2 counter=1000000 time=0.017171
+threads=4 counter=1000000 time=0.025676
+threads=8 counter=1000000 time=0.060381
+threads=16 counter=1000000 time=0.033709
