@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+while true; do 
+  read -p "Enter number a : " a
+  read -p "Enter number b : " b 
+  read -p "Enter the operator : " op
+
+  case "$op" in
+    +) 
+      echo "sum $((a+b))";;
+    -) 
+      echo "subtract $((a-b))";;
+    \*) 
+      echo "multiply $((a*b))";;
+    /) 
+      echo "divide $((a/b))";;
+    *)
+      echo "Invalid command";;
+  esac 
+
+done
+

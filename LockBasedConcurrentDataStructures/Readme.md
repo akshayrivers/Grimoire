@@ -10,3 +10,33 @@ It contains the following programs and how they are implemented along with their
 4. Hand over hand Locking in Linked Lists
 
 In Progress: 5. Skip Lists
+
+```
+Producer threads        Consumer threads
+---------------        ----------------
+ wait(empty)            wait(fill)
+     |                      |
+     v                      v
+
+        +----------------+
+        |     BUFFER     |
+        +----------------+
+
+ signal(fill)            signal(empty)
+
+// different diagram
+                 Mutex
+                 |
+                 v
+
+      +-----------------------+
+      |      BOUNDED BUFFER   |
+      |                       |
+      |  [ ][ ][ ][ ][ ]      |
+      +-----------------------+
+           ^             ^
+           |             |
+
+      wait(fill)    wait(empty)
+      consumers     producers
+```

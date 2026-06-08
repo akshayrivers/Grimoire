@@ -41,3 +41,10 @@ results/*.csv
 
 # Temporary files
 *~
+
+# Sanitizer builds
+LockBasedConcurrentDataStructures/*_asan
+LockBasedConcurrentDataStructures/*_tsan
+
+# macOS debug symbols
+*.dSYM/

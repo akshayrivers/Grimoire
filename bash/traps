@@ -1,0 +1,9 @@
+#!/bin/bash
+
+trap "echo 'Interrupt received'; exit" SIGINT
+
+while true
+do
+    echo "Press Ctrl+C to stop"
+    sleep 2
+done
