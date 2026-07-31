@@ -1,5 +1,5 @@
 # B TREE 
-![BTREE](B-Tree.jpg)
+![BTREE](/B%20and%20B+Tree/assets/B-Tree.jpg)
 
 ## B-Tree Structure:
 - Nodes contain keys and pointers.
@@ -21,7 +21,7 @@
 - Inefficient for range queries due to scattered key storage.
 
 # B+ TREE 
-![B+TREE](B+Tree.jpg)
+![B+TREE](/B%20and%20B+Tree/assets/B+Tree.jpg)
 
 ## B+ Tree Structure:
 - Similar to a B-Tree but with a different arrangement:

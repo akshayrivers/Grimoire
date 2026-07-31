@@ -4,7 +4,7 @@ huffman_coding/.DS_Store
 huffman_coding/implementation/.DS_Store
 .DS_Store
 .excalidraw
-
+notes.md
 ./.DS_Store
 
 # Compiled binaries
@@ -48,3 +48,4 @@ LockBasedConcurrentDataStructures/*_tsan
 
 # macOS debug symbols
 *.dSYM/
+python
