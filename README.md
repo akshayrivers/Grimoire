@@ -1,18 +1,26 @@
+> Collecting spells as a knight to converse with the beautiful mage a little longer.
 # Grimoire
 
-A Collection of Interesting Algorithms and code and their Implemantations I did while learning
-Till Now it has:
+A collection of algorithms, data structures, and interesting computer science concepts I implement while learning them.
 
-#### Huffman Coding Algorithm
+- [x] Huffman Coding Algorithm
+- [x] Java Quirks
+- [x] Bash Quirks
+## Trees:
+- [x] B Trees (CLRS) 
+- [x] B+ Trees (CLRS)
+- [ ] LSM(Log structured Merge Tree)
 
-#### LSM(Log structured Merge Tree)
-
-#### B and B+ Tree
-
-#### Lock Based Concurrent Data Structures
-
-#### Hell Tic tac toe
-
-#### Bloom Filters
-
-#### Rope
+## Lock Based Concurrent Data Structures
+- [x] Sloppy Counter
+- [x] Hand Over Hand Locking
+- [ ] Concurrent Skip List
+## Hell Tic tac toe
+- [x] Planned
+- [ ] Implementation
+### Bloom Filters
+- [x] Theory 
+- [ ] Implementation
+## Rope
+- [x] Theory 
+- [ ] Implementation
