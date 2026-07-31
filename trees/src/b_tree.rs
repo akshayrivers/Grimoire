@@ -1,4 +1,4 @@
-pub const M: usize = 4; // order = max children per node
+pub const M: usize = 32; // order = max children per node
 const MAX_KEYS: usize = M - 1;
 const MIN_KEYS: usize = (M + 1) / 2 - 1; // ceil(M/2)-1 = 1 for non root nodes
 
@@ -81,9 +81,18 @@ impl BTree {
                     let child_idx = self.nodes[node_idx].children[child_pos];
                     if self.nodes[child_idx].is_full() {
                         self.split_child(node_idx, child_pos);
-                        // after splitting the node mid key is at self.nodes[node_idx].keys[child_pos]
-                        if key > self.nodes[node_idx].keys[child_pos] {
-                            child_pos += 1;
+                        // after splitting, the promoted median key now lives at
+                        // node_idx.keys[child_pos] — if our insert key equals it,
+                        // the key already exists right here; overwrite and stop.
+                        match key.cmp(&self.nodes[node_idx].keys[child_pos]) {
+                            std::cmp::Ordering::Equal => {
+                                self.nodes[node_idx].values[child_pos] = value;
+                                return;
+                            }
+                            std::cmp::Ordering::Greater => {
+                                child_pos += 1;
+                            }
+                            std::cmp::Ordering::Less => {}
                         }
                     }
                     let target_child = self.nodes[node_idx].children[child_pos];
@@ -135,17 +144,10 @@ impl BTree {
                     // Key doesn't exist.
                     return;
                 }
-                // Ensuring child is safe before descending.
-                self.fill_child(node_idx, pos);
-
-                // merge_children() may have merged child[pos]
-                // with child[pos+1], so if pos now points past the end, so we adjust it.
-                let child_pos = if pos >= self.nodes[node_idx].children.len() {
-                    pos - 1
-                } else {
-                    pos
-                };
-
+                // fill_child ensures children[pos] is safe to descend into, and returns
+                // the (possibly shifted, if a merge with the left sibling happened) position
+                // to actually descend into — no length-inference needed.
+                let child_pos = self.fill_child(node_idx, pos);
                 let child_idx = self.nodes[node_idx].children[child_pos];
 
                 self.delete_from(child_idx, key);
@@ -168,7 +170,7 @@ impl BTree {
             let (pred_key, pred_value) = self.get_predecessor(left_idx);
 
             self.nodes[node_idx].keys[pos] = pred_key;
-            self.nodes[node_idx].values[pos] = pred_value.clone();
+            self.nodes[node_idx].values[pos] = pred_value;
 
             self.delete_from(left_idx, pred_key);
         } else if
@@ -178,7 +180,7 @@ impl BTree {
             let (succ_key, succ_value) = self.get_successor(right_idx);
 
             self.nodes[node_idx].keys[pos] = succ_key;
-            self.nodes[node_idx].values[pos] = succ_value.clone();
+            self.nodes[node_idx].values[pos] = succ_value;
 
             self.delete_from(right_idx, succ_key);
         } else {
@@ -220,23 +222,25 @@ impl BTree {
             self.get_successor(child)
         }
     }
-    fn fill_child(&mut self, node_idx: usize, child_pos: usize) {
+
+    // Ensures children[child_pos] has more than MIN_KEYS keys before we descend into it.
+    // Returns the position to actually descend into — this is child_pos unchanged, UNLESS
+    // a merge with the LEFT sibling happened (only possible when child_pos was the last
+    // child), in which case the merged node now sits at child_pos - 1.
+    fn fill_child(&mut self, node_idx: usize, child_pos: usize) -> usize {
         let child_idx = self.nodes[node_idx].children[child_pos];
 
         // Already safe.
         if self.nodes[child_idx].keys.len() > MIN_KEYS {
-            return;
+            return child_pos;
         }
 
         // Try borrowing from the left sibling.
-        if
-            child_pos > 0 &&
-            self.nodes[self.nodes[node_idx].children[child_pos - 1]].keys.len() > MIN_KEYS
-        {
+        if child_pos > 0 {
             let left_idx = self.nodes[node_idx].children[child_pos - 1];
             if self.nodes[left_idx].keys.len() > MIN_KEYS {
                 self.borrow_from_left(node_idx, child_pos);
-                return;
+                return child_pos;
             }
         }
 
@@ -245,41 +249,43 @@ impl BTree {
             let right_idx = self.nodes[node_idx].children[child_pos + 1];
             if self.nodes[right_idx].keys.len() > MIN_KEYS {
                 self.borrow_from_right(node_idx, child_pos);
-                return;
+                return child_pos;
             }
         }
 
         // Neither sibling can lend, so merge.
         if child_pos + 1 < self.nodes[node_idx].children.len() {
             self.merge_children(node_idx, child_pos);
+            child_pos
         } else {
             self.merge_children(node_idx, child_pos - 1);
+            child_pos - 1
         }
     }
     fn borrow_from_left(&mut self, node_idx: usize, child_pos: usize) {
         let left_idx = self.nodes[node_idx].children[child_pos - 1];
         let child_idx = self.nodes[node_idx].children[child_pos];
 
-        // parent
         let parent_key = self.nodes[node_idx].keys[child_pos - 1];
         let parent_value = self.nodes[node_idx].values[child_pos - 1].clone();
 
         let borrowed_key;
         let borrowed_value;
         {
-            // borrow parent, left child and sibling
-            let (left_slice, rest) = self.nodes.split_at_mut(child_idx);
-            let left = &mut left_slice[left_idx];
-            let child = &mut rest[0];
+            let (left, child) = if left_idx < child_idx {
+                let (a, b) = self.nodes.split_at_mut(child_idx);
+                (&mut a[left_idx], &mut b[0])
+            } else {
+                let (a, b) = self.nodes.split_at_mut(left_idx);
+                (&mut b[0], &mut a[child_idx])
+            };
 
-            // we find largest key/value from left sibling
             borrowed_key = left.keys.pop().unwrap();
             borrowed_value = left.values.pop().unwrap();
 
             child.keys.insert(0, parent_key);
             child.values.insert(0, parent_value);
 
-            // if internal node then we move the last child pointer too
             if !left.is_leaf {
                 let borrowed_child = left.children.pop().unwrap();
                 child.children.insert(0, borrowed_child);
@@ -292,35 +298,31 @@ impl BTree {
         let child_idx = self.nodes[node_idx].children[child_pos];
         let right_idx = self.nodes[node_idx].children[child_pos + 1];
 
-        // Parent separator
         let parent_key = self.nodes[node_idx].keys[child_pos];
         let parent_value = self.nodes[node_idx].values[child_pos].clone();
 
         let borrowed_key;
         let borrowed_value;
-
         {
-            // Borrow child and right sibling simultaneously
-            let (left, right) = self.nodes.split_at_mut(right_idx);
-            let child = &mut left[child_idx];
-            let right = &mut right[0];
+            let (child, right) = if child_idx < right_idx {
+                let (a, b) = self.nodes.split_at_mut(right_idx);
+                (&mut a[child_idx], &mut b[0])
+            } else {
+                let (a, b) = self.nodes.split_at_mut(child_idx);
+                (&mut b[0], &mut a[right_idx])
+            };
 
-            // Smallest key/value from right sibling
             borrowed_key = right.keys.remove(0);
             borrowed_value = right.values.remove(0);
 
-            // Parent separator moves down to end of child
             child.keys.push(parent_key);
             child.values.push(parent_value);
 
-            // If internal, move first child pointer
             if !right.is_leaf {
                 let borrowed_child = right.children.remove(0);
                 child.children.push(borrowed_child);
             }
         }
-
-        // Borrowed key becomes new separator
         self.nodes[node_idx].keys[child_pos] = borrowed_key;
         self.nodes[node_idx].values[child_pos] = borrowed_value;
     }
@@ -390,7 +392,12 @@ impl BTree {
                 assert!(k > lo);
             }
             if let Some(hi) = max {
-                assert!(k < hi);
+                if !(k < hi) {
+                    println!("node {:?}", node.keys);
+                    println!("k = {}", k);
+                    println!("hi = {}", hi);
+                    panic!("upper bound violated");
+                }
             }
         }
 
@@ -440,35 +447,27 @@ mod tests {
     #[test]
     fn single_insert() {
         let mut tree = BTree::new();
-
         tree.insert(10, "a".into());
-
         tree.validate();
-
         assert_eq!(tree.search(10), Some(&"a".to_string()));
     }
 
     #[test]
     fn overwrite_value() {
         let mut tree = BTree::new();
-
         tree.insert(5, "hello".into());
         tree.insert(5, "world".into());
-
         tree.validate();
-
         assert_eq!(tree.search(5), Some(&"world".to_string()));
     }
 
     #[test]
     fn ascending_insert() {
         let mut tree = BTree::new();
-
         for i in 0..100 {
             tree.insert(i, format!("{}", i));
             tree.validate();
         }
-
         for i in 0..100 {
             assert!(tree.search(i).is_some());
         }
@@ -477,7 +476,6 @@ mod tests {
     #[test]
     fn descending_insert() {
         let mut tree = BTree::new();
-
         for i in (0..100).rev() {
             tree.insert(i, format!("{}", i));
             tree.validate();
@@ -487,16 +485,13 @@ mod tests {
     #[test]
     fn delete_all_forward() {
         let mut tree = BTree::new();
-
         for i in 0..100 {
             tree.insert(i, format!("{}", i));
         }
-
         for i in 0..100 {
             tree.delete(i);
             tree.validate();
         }
-
         for i in 0..100 {
             assert!(tree.search(i).is_none());
         }
@@ -505,11 +500,9 @@ mod tests {
     #[test]
     fn delete_all_reverse() {
         let mut tree = BTree::new();
-
         for i in 0..100 {
             tree.insert(i, format!("{}", i));
         }
-
         for i in (0..100).rev() {
             tree.delete(i);
             tree.validate();
@@ -519,42 +512,31 @@ mod tests {
     #[test]
     fn delete_missing_key() {
         let mut tree = BTree::new();
-
         tree.insert(10, "10".into());
-
         tree.delete(999);
-
         tree.validate();
     }
 
     #[test]
     fn mixed_operations() {
         let mut tree = BTree::new();
-
         tree.insert(10, "10".into());
         tree.insert(20, "20".into());
         tree.insert(30, "30".into());
-
         tree.delete(20);
-
         tree.insert(40, "40".into());
-
         tree.delete(10);
-
         tree.insert(50, "50".into());
-
         tree.validate();
     }
 
     #[test]
     fn stress() {
         let mut tree = BTree::new();
-
         for i in 0..1000 {
             tree.insert(i, format!("{}", i));
             tree.validate();
         }
-
         for i in 0..1000 {
             tree.delete(i);
             tree.validate();

@@ -1,43 +1,19 @@
-# B TREE 
-![BTREE](/B%20and%20B+Tree/assets/B-Tree.jpg)
+## Release Build (`cargo run --release`)
 
-## B-Tree Structure:
-- Nodes contain keys and pointers.
-- Internal nodes store keys and references to child nodes.
-- Leaf nodes also contain keys and possibly associated values.
+| Tree | Insert | Search | Delete | Full Range Scan |
+|---|---:|---:|---:|---:|
+| My BTree | 135.05 ms | 40.38 ms | 127.98 ms | N/A |
+| My BPlusTree | 113.36 ms | 43.45 ms | 353.13 ms | 38.20 ms |
+| `std::collections::BTreeMap` | 97.39 ms | 46.27 ms | 41.73 ms | 6.72 ms |
+| `bplustree` crate | 83.33 ms | 101.57 ms | 115.96 ms | 666 ns |
 
-## Search:
-- The search stops at the leaf or the node containing the key.
-- Keys are distributed across all levels, including internal nodes.
+---
 
-## Insertion/Deletion:
-- May require splitting or merging nodes to maintain balance.
+## Debug Build (`cargo run`)
 
-## Usage:
-- Useful for scenarios where frequent updates (insertions/deletions) are required.
-
-## Traversal:
-- Can be performed directly through internal and leaf nodes.
-- Inefficient for range queries due to scattered key storage.
-
-# B+ TREE 
-![B+TREE](/B%20and%20B+Tree/assets/B+Tree.jpg)
-
-## B+ Tree Structure:
-- Similar to a B-Tree but with a different arrangement:
-- Internal nodes contain keys but no values, only pointers to child nodes.
-- Leaf nodes contain all keys and associated values in a sorted manner.
-- Leaf nodes are linked, forming a linked list for sequential access.
-
-## Search:
-- The search always proceeds to the leaf level.
-- Efficient for range queries due to the linked list structure of leaves.
-
-## Insertion/Deletion:
-- Similar to B-Trees, but the leaf node structure makes certain operations simpler.
-
-## Usage:
-- Preferred for applications requiring efficient range queries and sequential access, like databases and file systems.
-
-## Traversal:
-- More efficient for range queries and sorted order traversals due to the linked list of leaves.
+| Tree | Insert | Search | Delete | Full Range Scan |
+|---|---:|---:|---:|---:|
+| My BTree | 553.71 ms | 318.36 ms | 494.29 ms | N/A |
+| My BPlusTree | 526.89 ms | 351.28 ms | 3.23 s | 54.30 ms |
+| `std::collections::BTreeMap` | 822.55 ms | 437.66 ms | 448.46 ms | 49.47 ms |
+| `bplustree` crate | 1.46 s | 1.22 s | 1.18 s | 2.17 µs |
