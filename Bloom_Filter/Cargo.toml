@@ -1,0 +1,8 @@
+[package]
+name = "Bloom_Filter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+criterion = "0.8.2"
+xxhash-rust = "0.8.18"
