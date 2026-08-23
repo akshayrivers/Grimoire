@@ -50,3 +50,5 @@ LockBasedConcurrentDataStructures/*_tsan
 # macOS debug symbols
 *.dSYM/
 python
+
+Bloom_Filter/target/

@@ -42,7 +42,7 @@ Specifically The Deleteable Bloom filter (probabilistic deletability).
        ┌─────┴─────┐          region collision
        │           │             tracking
        ▼           ▼
-    hash positions
+    hash        positions
        │
        ▼
  h1(x) + i × h2(x)
