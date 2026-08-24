@@ -36,7 +36,7 @@ mod tests {
 
     #[test]
     fn same_input_same_hash() {
-        let hasher = Fnv::new(42,50);
+        let hasher = Fnv::new(42, 50);
 
         let first = hasher.hash(b"manglu");
         let second = hasher.hash(b"manglu");

@@ -8,3 +8,15 @@ criterion = "0.8.2"
 fnv = "1.0.7"
 murmur3 = "0.5.2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[[bench]]
+name = "insertion"
+harness = false
+
+[[bench]]
+name = "lookup"
+harness = false
+
+[[bench]]
+name = "deletion"
+harness = false

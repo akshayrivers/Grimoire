@@ -1,23 +1,23 @@
-use xxhash_rust::xxh3::{xxh3_64_with_seed};
+use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::hasher::Hasher;
 
-pub struct Xxhash{
-    seed:u64,
+pub struct Xxhash {
+    seed: u64,
 }
 
-impl Xxhash{
-    pub fn new(seed:u64)->Self{
+impl Xxhash {
+    pub fn new(seed: u64) -> Self {
         Self { seed }
     }
 }
 
-impl Hasher for Xxhash{
-    fn hash(&self, data: &[u8])->(u64,u64){
-        let h1 = xxh3_64_with_seed(data,self.seed);
+impl Hasher for Xxhash {
+    fn hash(&self, data: &[u8]) -> (u64, u64) {
+        let h1 = xxh3_64_with_seed(data, self.seed);
         let h2 = xxh3_64_with_seed(data, self.seed.wrapping_add(1));
 
-        (h1,h2)
+        (h1, h2)
     }
 }
 
