@@ -20,7 +20,12 @@ A collection of algorithms, data structures, and interesting computer science co
 - [ ] Implementation
 ### Bloom Filters
 - [x] Theory 
-- [ ] Implementation
+- [x] Implementation
 ## Rope
 - [x] Theory 
 - [ ] Implementation
+
+## DNS Resolver
+Link: https://github.com/akshayrivers/DNS-Resolver
+- [x] Theory
+- [x] Implementation
