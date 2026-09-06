@@ -26,6 +26,6 @@ A collection of algorithms, data structures, and interesting computer science co
 - [ ] Implementation
 
 ## DNS Resolver
-Link: https://github.com/akshayrivers/DNS-Resolver
+Link: [DNS Resolver in Rust](https://github.com/akshayrivers/DNS-Resolver)
 - [x] Theory
 - [x] Implementation
