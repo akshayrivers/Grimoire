@@ -1,4 +1,4 @@
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -626,9 +626,14 @@ impl SsTableWriter {
     }
 }
 
+struct CachedBlock {
+    block_offset: u64,
+    data: Vec<u8>,
+}
+
 /// Reader for an immutable SSTable file on disk.
 /// Loads only the Sparse Index and Bloom Filter into memory.
-/// Data blocks remain on disk and are only fetched when needed.
+/// Data blocks remain on disk and are fetched and cached on demand.
 pub struct SsTableReader {
     file: File,
     path: PathBuf,
@@ -636,6 +641,59 @@ pub struct SsTableReader {
     pub max_key: Vec<u8>,
     pub bloom_filter: BloomFilter<Murmur3>,
     pub index: Vec<IndexEntry>,
+    cached_block: Option<CachedBlock>,
+}
+
+fn search_in_block(data: &[u8], target_key: &[u8]) -> io::Result<Option<(u64, ValueType)>> {
+    let mut cursor = 0;
+    while cursor < data.len() {
+        if cursor + 8 + 1 + 4 > data.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Incomplete record header in block"));
+        }
+
+        let seq_num = u64::from_be_bytes(data[cursor..cursor + 8].try_into().unwrap());
+        cursor += 8;
+
+        let val_type_byte = data[cursor];
+        cursor += 1;
+
+        let key_len = u32::from_be_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+
+        if cursor + key_len + 4 > data.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Incomplete record key/val_len in block"));
+        }
+
+        let key_slice = &data[cursor..cursor + key_len];
+        cursor += key_len;
+
+        let val_len = u32::from_be_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+
+        if cursor + val_len > data.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Incomplete record value bytes in block"));
+        }
+
+        match key_slice.cmp(target_key) {
+            std::cmp::Ordering::Equal => {
+                let val_bytes = data[cursor..cursor + val_len].to_vec();
+                let value = match val_type_byte {
+                    RECORD_TYPE_PUT => ValueType::Put(val_bytes),
+                    RECORD_TYPE_TOMBSTONE => ValueType::Tombstone,
+                    _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid record type byte in block")),
+                };
+                return Ok(Some((seq_num, value)));
+            }
+            std::cmp::Ordering::Greater => {
+                return Ok(None);
+            }
+            std::cmp::Ordering::Less => {
+                cursor += val_len;
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 impl SsTableReader {
@@ -741,6 +799,7 @@ impl SsTableReader {
             max_key,
             bloom_filter,
             index,
+            cached_block: None,
         })
     }
 
@@ -755,8 +814,8 @@ impl SsTableReader {
     /// 1. Key range check (`min_key` .. `max_key`): $O(1)$ fast exit if outside range.
     /// 2. Bloom Filter check: $O(1)$ fast exit if negative (ZERO data block reads).
     /// 3. Binary search on Sparse Index: finds target block in $O(\log B)$ time.
-    /// 4. Disk read: reads ONLY the single target block (~4KB) from disk.
-    /// 5. In-block scan: binary/linear search inside the loaded block buffer.
+    /// 4. Block Cache check: if the target block is cached, skip disk I/O entirely!
+    /// 5. In-block scan: zero-allocation slice search inside the cached block buffer.
     pub fn get(&mut self, key: &[u8]) -> io::Result<Option<(u64, ValueType)>> {
         // 1. Min/Max Range Check
         if key < self.min_key.as_slice() || key > self.max_key.as_slice() {
@@ -781,29 +840,33 @@ impl SsTableReader {
 
         let target_entry = &self.index[block_idx];
 
-        // 4. Read single Data Block from disk
-        self.file.seek(SeekFrom::Start(target_entry.block_offset))?;
-        let mut block_data = vec![0u8; target_entry.block_len as usize];
-        self.file.read_exact(&mut block_data)?;
+        // 4. Block Cache: if block is already loaded, reuse it!
+        let is_cached = self
+            .cached_block
+            .as_ref()
+            .map_or(false, |c| c.block_offset == target_entry.block_offset);
 
-        let mut crc_buf = [0u8; 4];
-        self.file.read_exact(&mut crc_buf)?;
-        let expected_crc = u32::from_be_bytes(crc_buf);
-        if crc32(&block_data) != expected_crc {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Data block CRC mismatch"));
-        }
+        if !is_cached {
+            self.file.seek(SeekFrom::Start(target_entry.block_offset))?;
+            let mut block_data = vec![0u8; target_entry.block_len as usize];
+            self.file.read_exact(&mut block_data)?;
 
-        // 5. Scan records in memory within target block
-        let records = decode_block_records(&block_data)?;
-        for record in records {
-            if record.key == key {
-                return Ok(Some((record.seq_num, record.value)));
-            } else if record.key.as_slice() > key {
-                break;
+            let mut crc_buf = [0u8; 4];
+            self.file.read_exact(&mut crc_buf)?;
+            let expected_crc = u32::from_be_bytes(crc_buf);
+            if crc32(&block_data) != expected_crc {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Data block CRC mismatch"));
             }
+
+            self.cached_block = Some(CachedBlock {
+                block_offset: target_entry.block_offset,
+                data: block_data,
+            });
         }
 
-        Ok(None)
+        // 5. Zero-allocation scan in memory within target block
+        let cached = self.cached_block.as_ref().unwrap();
+        search_in_block(&cached.data, key)
     }
 
     /// Reads all records across all data blocks sequentially.
@@ -832,6 +895,428 @@ impl SsTableReader {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+
+// 6. LSM Tree Storage Engine (THE GREAT ORCHESTRATOR)
+
+/// Configuration parameters for tuning the LSM Tree.
+#[derive(Debug, Clone)]
+pub struct LsmConfig {
+    /// Maximum memory (in bytes) of the active MemTable before triggering an SSTable flush.
+    pub memtable_capacity_bytes: usize,
+    /// Target chunk size (in bytes) for data blocks inside an SSTable (~4KB is typical).
+    pub sstable_block_size: usize,
+    /// Whether to call fsync on every single mutation.
+    /// Default is false for high-throughput buffered WAL (matches LevelDB/RocksDB defaults).
+    pub sync_wal: bool,
+}
+
+impl Default for LsmConfig {
+    fn default() -> Self {
+        Self {
+            memtable_capacity_bytes: 4 * 1024 * 1024, // 4MB
+            sstable_block_size: DEFAULT_BLOCK_SIZE,   // 4KB
+            sync_wal: false,
+        }
+    }
+}
+
+/// A complete, high-performance/Educational Log-Structured Merge (LSM) Tree engine.
+///
+/// Features:
+/// 1. Append-only WAL for crash-durability (fsync on commit).
+/// 2. In-memory sorted MemTable for sub-microsecond writes.
+/// 3. Immutable SSTables with Bloom Filters for 0-disk-read skips on cold keys.
+/// 4. Sparse indexes for binary-search block lookups.
+/// 5. Append-only tombstone deletions.
+/// 6. Crash recovery replaying un-flushed WAL logs.
+/// 7. Multi-way merge Range Scans.
+/// 8. Compaction to reclaim space, prune dead tombstones, and reduce read amplification.
+pub struct LsmTree {
+    dir: PathBuf,
+    config: LsmConfig,
+    active_memtable: MemTable,
+    active_wal: WalWriter,
+    /// SSTables ordered from NEWEST (index 0) to OLDEST (index n-1).
+    sstables: Vec<SsTableReader>,
+    next_seq_num: u64,
+    next_sst_id: u64,
+}
+
+impl LsmTree {
+    /// Opens or creates an LSM Tree with default settings in the specified directory.
+    pub fn open(dir: impl AsRef<Path>) -> io::Result<Self> {
+        Self::open_with_config(dir, LsmConfig::default())
+    }
+
+    /// Opens or creates an LSM Tree with custom configuration.
+    pub fn open_with_config(dir: impl AsRef<Path>, config: LsmConfig) -> io::Result<Self> {
+        let dir = dir.as_ref().to_path_buf();
+        fs::create_dir_all(&dir)?;
+
+        // 1. Discover all .sst files in directory
+        let mut sst_files = Vec::new();
+        let mut max_id = 0u64;
+
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("sst") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if let Ok(id) = stem.parse::<u64>() {
+                        max_id = max_id.max(id);
+                        sst_files.push((id, path));
+                    }
+                }
+            }
+        }
+
+        // Sort descending: highest id = newest SSTable
+        sst_files.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut sstables = Vec::new();
+        for (_, sst_path) in sst_files {
+            sstables.push(SsTableReader::open(sst_path)?);
+        }
+
+        // 2. Discover .wal files and replay any uncommitted records (Crash Recovery)
+        let mut wal_files = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("wal") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if let Ok(id) = stem.parse::<u64>() {
+                        max_id = max_id.max(id);
+                        wal_files.push((id, path));
+                    }
+                }
+            }
+        }
+
+        // Sort ascending: oldest WAL first for correct replay ordering
+        wal_files.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut memtable = MemTable::new(config.memtable_capacity_bytes);
+        let mut max_seq_num = 0u64;
+
+        for (_, wal_path) in &wal_files {
+            let recovered_records = WalReader::read_all(wal_path)?;
+            for record in recovered_records {
+                max_seq_num = max_seq_num.max(record.seq_num);
+                memtable.insert(record);
+            }
+        }
+
+        // 3. Initialize fresh active WAL and preserve recovered un-flushed records
+        let active_wal_path = dir.join(format!("{:06}.wal", max_id + 1));
+        let mut active_wal = WalWriter::create(&active_wal_path)?;
+
+        // Re-persist any recovered in-memory records into the active WAL
+        for (k, seq, val) in memtable.iter() {
+            let record = match val {
+                ValueType::Put(v) => Record::put(seq, k, v.clone()),
+                ValueType::Tombstone => Record::delete(seq, k),
+            };
+            active_wal.append(&record)?;
+        }
+        active_wal.sync()?;
+
+        // Clean up old replayed WAL files that have been merged into the new active WAL
+        for (_, wal_path) in wal_files {
+            if wal_path != active_wal_path {
+                let _ = fs::remove_file(wal_path);
+            }
+        }
+
+        Ok(Self {
+            dir,
+            config,
+            active_memtable: memtable,
+            active_wal,
+            sstables,
+            next_seq_num: max_seq_num + 1,
+            next_sst_id: max_id + 1,
+        })
+    }
+
+    /// Inserts or updates a key-value pair.
+    pub fn put(&mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> io::Result<()> {
+        let key = key.into();
+        let value = value.into();
+        let seq_num = self.next_seq_num;
+        self.next_seq_num += 1;
+
+        let record = Record::put(seq_num, key, value);
+
+        // 1. Write to WAL first (durability)
+        self.active_wal.append(&record)?;
+        if self.config.sync_wal {
+            self.active_wal.sync()?;
+        }
+
+        // 2. Write to in-memory MemTable
+        self.active_memtable.insert(record);
+
+        // 3. Trigger flush if MemTable capacity reached
+        if self.active_memtable.is_full() {
+            self.flush()?;
+        }
+
+        Ok(())
+    }
+
+    /// Deletes a key by appending a Tombstone record.
+    pub fn delete(&mut self, key: impl Into<Vec<u8>>) -> io::Result<()> {
+        let key = key.into();
+        let seq_num = self.next_seq_num;
+        self.next_seq_num += 1;
+
+        let record = Record::delete(seq_num, key);
+
+        // 1. Write Tombstone to WAL
+        self.active_wal.append(&record)?;
+        if self.config.sync_wal {
+            self.active_wal.sync()?;
+        }
+
+        // 2. Write Tombstone to MemTable
+        self.active_memtable.insert(record);
+
+        // 3. Trigger flush if full
+        if self.active_memtable.is_full() {
+            self.flush()?;
+        }
+
+        Ok(())
+    }
+
+    /// Explicitly flushes the WAL buffer and syncs OS disk cache (fsync).
+    pub fn sync(&mut self) -> io::Result<()> {
+        self.active_wal.sync()
+    }
+
+    /// Point lookup for a key across MemTable and all SSTables.
+    /// Returns `Ok(Some(bytes))` if found, or `Ok(None)` if deleted or missing.
+    pub fn get(&mut self, key: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        // Step 1: Check active MemTable
+        if let Some((_seq, val)) = self.active_memtable.get(key) {
+            return match val {
+                ValueType::Put(v) => Ok(Some(v.clone())),
+                ValueType::Tombstone => Ok(None), // Tombstone in MemTable masks everything older!
+            };
+        }
+
+        // Step 2: Check SSTables in reverse chronological order (newest first)
+        for sstable in &mut self.sstables {
+            if let Some((_seq, val)) = sstable.get(key)? {
+                return match val {
+                    ValueType::Put(v) => Ok(Some(v)),
+                    ValueType::Tombstone => Ok(None), // Tombstone in newer SSTable masks older SSTables!
+                };
+            }
+        }
+
+        // Not found in MemTable or any SSTable
+        Ok(None)
+    }
+
+    /// Flushes the active MemTable to a new SSTable on disk.
+    pub fn flush(&mut self) -> io::Result<()> {
+        if self.active_memtable.is_empty() {
+            return Ok(());
+        }
+
+        let sst_id = self.next_sst_id;
+        self.next_sst_id += 1;
+        let sst_path = self.dir.join(format!("{:06}.sst", sst_id));
+
+        // 1. Extract sorted records from current MemTable and reset it
+        let old_memtable = std::mem::replace(
+            &mut self.active_memtable,
+            MemTable::new(self.config.memtable_capacity_bytes),
+        );
+        let records = old_memtable.into_records();
+
+        // 2. Write new immutable SSTable to disk
+        SsTableWriter::write_new(&sst_path, &records, self.config.sstable_block_size)?;
+
+        // 3. Prepend newly flushed SSTable to the FRONT of our active list (newest first)
+        let reader = SsTableReader::open(&sst_path)?;
+        self.sstables.insert(0, reader);
+
+        // 4. Safely rotate WAL: delete old WAL only AFTER SSTable is committed to disk
+        let old_wal_path = self.active_wal.path().to_path_buf();
+        let new_wal_path = self.dir.join(format!("{:06}.wal", sst_id + 1));
+        self.active_wal = WalWriter::create(&new_wal_path)?;
+        let _ = fs::remove_file(old_wal_path);
+
+        Ok(())
+    }
+
+    /// Range scan returning all active (non-deleted) key-value pairs in `[start, end]`.
+    /// Merges MemTable and all SSTables, resolving version conflicts via sequence numbers.
+    pub fn scan(&mut self, start: &[u8], end: &[u8]) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if start > end {
+            return Ok(Vec::new());
+        }
+
+        // Map: Key -> (highest_seq_num, ValueType)
+        let mut merged: BTreeMap<Vec<u8>, (u64, ValueType)> = BTreeMap::new();
+
+        // 1. Merge all records from all SSTables
+        for sstable in &mut self.sstables {
+            let records = sstable.read_all_records()?;
+            for record in records {
+                if record.key.as_slice() >= start && record.key.as_slice() <= end {
+                    match merged.get(&record.key) {
+                        Some((existing_seq, _)) if *existing_seq >= record.seq_num => {}
+                        _ => {
+                            merged.insert(record.key, (record.seq_num, record.value));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Merge active MemTable entries (newest live writes)
+        for (k, seq, val) in self.active_memtable.iter() {
+            if k >= start && k <= end {
+                match merged.get(k) {
+                    Some((existing_seq, _)) if *existing_seq >= seq => {}
+                    _ => {
+                        merged.insert(k.to_vec(), (seq, val.clone()));
+                    }
+                }
+            }
+        }
+
+        // 3. Collect active Put entries (skipping dead tombstones)
+        let mut results = Vec::new();
+        for (key, (_seq, val)) in merged {
+            if let ValueType::Put(v) = val {
+                results.push((key, v));
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Merges all SSTables into a single consolidated SSTable.
+    ///
+    /// Compaction achieves three critical LSM optimizations:
+    /// 1. Drops superseded older versions of overwritten keys.
+    /// 2. Purges dead tombstones (at the bottom-most level, no older version can exist below).
+    /// 3. Merges N SSTables into 1, reducing read amplification back to 1 Bloom check.
+    pub fn compact(&mut self) -> io::Result<()> {
+        if self.sstables.len() <= 1 {
+            return Ok(());
+        }
+
+        // 1. Collect all records from all SSTables and resolve conflicts by highest sequence number
+        let mut merged: BTreeMap<Vec<u8>, (u64, ValueType)> = BTreeMap::new();
+        for sstable in &mut self.sstables {
+            let records = sstable.read_all_records()?;
+            for record in records {
+                match merged.get(&record.key) {
+                    Some((existing_seq, _)) if *existing_seq >= record.seq_num => {}
+                    _ => {
+                        merged.insert(record.key, (record.seq_num, record.value));
+                    }
+                }
+            }
+        }
+
+        // 2. Bottom-level tombstone elimination:
+        // Since we are compacting all SSTables, any Tombstone has superseded all prior versions.
+        // We can safely purge all Tombstones!
+        let mut compacted_records = Vec::new();
+        for (key, (seq_num, val)) in merged {
+            if let ValueType::Put(v) = val {
+                compacted_records.push(Record {
+                    seq_num,
+                    key,
+                    value: ValueType::Put(v),
+                });
+            }
+        }
+
+        // 3. Write new compacted SSTable
+        let new_sst_id = self.next_sst_id;
+        self.next_sst_id += 1;
+        let new_sst_path = self.dir.join(format!("{:06}.sst", new_sst_id));
+
+        if !compacted_records.is_empty() {
+            SsTableWriter::write_new(&new_sst_path, &compacted_records, self.config.sstable_block_size)?;
+            let new_reader = SsTableReader::open(&new_sst_path)?;
+
+            // 4. Delete old SSTable files from disk
+            for old_sstable in &self.sstables {
+                let _ = fs::remove_file(old_sstable.path());
+            }
+
+            self.sstables = vec![new_reader];
+        } else {
+            // All entries were tombstones! Purge all SSTables.
+            for old_sstable in &self.sstables {
+                let _ = fs::remove_file(old_sstable.path());
+            }
+            self.sstables.clear();
+        }
+
+        Ok(())
+    }
+
+    /// Number of active SSTables on disk.
+    pub fn sstable_count(&self) -> usize {
+        self.sstables.len()
+    }
+
+    /// Number of distinct entries in the active MemTable.
+    pub fn memtable_len(&self) -> usize {
+        self.active_memtable.len()
+    }
+
+    // Convenience Helpers for String Keys & Values
+
+    pub fn put_str(&mut self, key: &str, value: &str) -> io::Result<()> {
+        self.put(key.as_bytes(), value.as_bytes())
+    }
+
+    pub fn delete_str(&mut self, key: &str) -> io::Result<()> {
+        self.delete(key.as_bytes())
+    }
+
+    pub fn get_str(&mut self, key: &str) -> io::Result<Option<String>> {
+        self.get(key.as_bytes()).map(|opt| opt.and_then(|bytes| String::from_utf8(bytes).ok()))
+    }
+
+    pub fn scan_str(&mut self, start: &str, end: &str) -> io::Result<Vec<(String, String)>> {
+        let raw = self.scan(start.as_bytes(), end.as_bytes())?;
+        let res = raw
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let key_str = String::from_utf8(k).ok()?;
+                let val_str = String::from_utf8(v).ok()?;
+                Some((key_str, val_str))
+            })
+            .collect();
+        Ok(res)
+    }
+
+    // Convenience Helpers for Integer Keys
+
+    pub fn put_i32(&mut self, key: i32, value: &str) -> io::Result<()> {
+        self.put(key.to_be_bytes(), value.as_bytes())
+    }
+
+    pub fn delete_i32(&mut self, key: i32) -> io::Result<()> {
+        self.delete(key.to_be_bytes())
+    }
+
+    pub fn get_i32(&mut self, key: i32) -> io::Result<Option<String>> {
+        self.get(&key.to_be_bytes()).map(|opt| opt.and_then(|bytes| String::from_utf8(bytes).ok()))
     }
 }
 
@@ -1050,5 +1535,174 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_lsm_tree_basic_ops() {
+        let temp_dir = std::env::temp_dir().join("lsm_engine_basic");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        let mut tree = LsmTree::open(&temp_dir).unwrap();
+
+        tree.put_str("user:101", "Alice").unwrap();
+        tree.put_str("user:102", "Bob").unwrap();
+
+        assert_eq!(tree.get_str("user:101").unwrap(), Some("Alice".to_string()));
+        assert_eq!(tree.get_str("user:102").unwrap(), Some("Bob".to_string()));
+        assert_eq!(tree.get_str("user:999").unwrap(), None);
+
+        // Update
+        tree.put_str("user:101", "Alice Updated").unwrap();
+        assert_eq!(tree.get_str("user:101").unwrap(), Some("Alice Updated".to_string()));
+
+        // Delete with Tombstone
+        tree.delete_str("user:101").unwrap();
+        assert_eq!(tree.get_str("user:101").unwrap(), None);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_lsm_tree_auto_flush_and_sstable_reads() {
+        let temp_dir = std::env::temp_dir().join("lsm_engine_flush");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        // Configure tiny memtable (200 bytes) to force flushes
+        let config = LsmConfig {
+            memtable_capacity_bytes: 200,
+            sstable_block_size: 128,
+            sync_wal: false,
+        };
+        let mut tree = LsmTree::open_with_config(&temp_dir, config).unwrap();
+
+        for i in 0..20 {
+            tree.put_str(&format!("key:{:03}", i), &format!("val:{:03}", i)).unwrap();
+        }
+
+        // Multiple SSTables should have been flushed
+        assert!(tree.sstable_count() > 0, "Expected flushes, got {} SSTables", tree.sstable_count());
+
+        // Verify all keys can still be retrieved across MemTable and SSTables
+        for i in 0..20 {
+            let key = format!("key:{:03}", i);
+            let expected = format!("val:{:03}", i);
+            assert_eq!(tree.get_str(&key).unwrap(), Some(expected));
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_lsm_tree_crash_recovery() {
+        let temp_dir = std::env::temp_dir().join("lsm_engine_recovery");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        // 1. Open tree, insert keys without flushing (live only in WAL + MemTable)
+        {
+            let mut tree = LsmTree::open(&temp_dir).unwrap();
+            tree.put_str("tx:1", "pending").unwrap();
+            tree.put_str("tx:2", "committed").unwrap();
+            tree.put_str("tx:3", "rollback").unwrap();
+            tree.delete_str("tx:1").unwrap();
+            tree.sync().unwrap();
+            // Drop tree (simulating shutdown/crash without flushing to SSTable)
+        }
+
+        // 2. Reopen from same directory: should replay WAL
+        {
+            let mut recovered_tree = LsmTree::open(&temp_dir).unwrap();
+            assert_eq!(recovered_tree.get_str("tx:1").unwrap(), None); // was deleted before crash
+            assert_eq!(recovered_tree.get_str("tx:2").unwrap(), Some("committed".to_string()));
+            assert_eq!(recovered_tree.get_str("tx:3").unwrap(), Some("rollback".to_string()));
+
+            // Write new records after recovery
+            recovered_tree.put_str("tx:4", "new_tx").unwrap();
+            assert_eq!(recovered_tree.get_str("tx:4").unwrap(), Some("new_tx".to_string()));
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_lsm_tree_range_scan() {
+        let temp_dir = std::env::temp_dir().join("lsm_engine_scan");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        let config = LsmConfig {
+            memtable_capacity_bytes: 200,
+            sstable_block_size: 128,
+            sync_wal: false,
+        };
+        let mut tree = LsmTree::open_with_config(&temp_dir, config).unwrap();
+
+        // Populate entries across multiple SSTables
+        for i in (10..=60).step_by(10) {
+            tree.put_str(&format!("k:{:02}", i), &format!("v:{}", i)).unwrap();
+        }
+
+        // Update k:30, delete k:40
+        tree.put_str("k:30", "v:30_updated").unwrap();
+        tree.delete_str("k:40").unwrap();
+
+        // Scan range k:20 ..= k:50
+        let results = tree.scan_str("k:20", "k:50").unwrap();
+        let expected = vec![
+            ("k:20".to_string(), "v:20".to_string()),
+            ("k:30".to_string(), "v:30_updated".to_string()),
+            // k:40 was deleted (Tombstone), so must NOT appear!
+            ("k:50".to_string(), "v:50".to_string()),
+        ];
+
+        assert_eq!(results, expected);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_lsm_tree_compaction() {
+        let temp_dir = std::env::temp_dir().join("lsm_engine_compaction");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        let config = LsmConfig {
+            memtable_capacity_bytes: 150,
+            sstable_block_size: 128,
+            sync_wal: false,
+        };
+        let mut tree = LsmTree::open_with_config(&temp_dir, config).unwrap();
+
+        // Generate multiple SSTables with overwrites and deletions
+        for epoch in 0..5 {
+            tree.put_str("user:alice", &format!("status_{}", epoch)).unwrap();
+            tree.put_str("user:bob", "active").unwrap();
+            tree.put_str(&format!("temp:{}", epoch), "garbage").unwrap();
+            tree.flush().unwrap();
+        }
+
+        // Delete Bob and all temp keys
+        tree.delete_str("user:bob").unwrap();
+        for epoch in 0..5 {
+            tree.delete_str(&format!("temp:{}", epoch)).unwrap();
+        }
+        tree.flush().unwrap();
+
+        let sst_count_before = tree.sstable_count();
+        assert!(sst_count_before >= 5, "Expected at least 5 SSTables before compaction, got {}", sst_count_before);
+
+        // Run Compaction: collapses all SSTables into 1, purges dead tombstones & overwritten versions
+        tree.compact().unwrap();
+
+        assert_eq!(tree.sstable_count(), 1, "Expected exactly 1 consolidated SSTable after compaction");
+
+        // Latest Alice status is preserved
+        assert_eq!(tree.get_str("user:alice").unwrap(), Some("status_4".to_string()));
+
+        // Bob and temp keys are deleted
+        assert_eq!(tree.get_str("user:bob").unwrap(), None);
+        for epoch in 0..5 {
+            assert_eq!(tree.get_str(&format!("temp:{}", epoch)).unwrap(), None);
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }
+
 

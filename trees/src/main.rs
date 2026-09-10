@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use trees::b_tree::BTree;
 use trees::b_plus_tree::BPlusTree;
+use trees::lsm_tree::{LsmTree, LsmConfig};
 use bplustree::BPlusTree as StdBPlusTree;
 
 fn main() {
@@ -84,7 +85,7 @@ fn main() {
 
     println!("\n===== bplustree crate =====");
 
-    let mut std_tree = StdBPlusTree::new();
+    let std_tree = StdBPlusTree::new();
 
     let start = Instant::now();
     for i in 0..n {
@@ -114,4 +115,80 @@ fn main() {
     while let Some((_k, _v)) = iter.next() {}
 
     println!("Full range scan : {:?}", start.elapsed());
+
+    println!("\n===== My LsmTree =====");
+    let lsm_dir = std::env::temp_dir().join("trees_main_lsm_bench");
+    let _ = std::fs::remove_dir_all(&lsm_dir);
+
+    let mut my_lsm = LsmTree::open_with_config(
+        &lsm_dir,
+        LsmConfig {
+            memtable_capacity_bytes: 8 * 1024 * 1024,
+            sstable_block_size: 4096,
+            sync_wal: false,
+        },
+    ).expect("failed to open LSM tree");
+
+    let start = Instant::now();
+    for i in 0..n {
+        my_lsm.put_i32(i, &format!("value-{i}")).unwrap();
+    }
+    println!("Insert : {:?}", start.elapsed());
+
+    let start = Instant::now();
+    for i in 0..n {
+        my_lsm.get_i32(i).unwrap();
+    }
+    println!("Search : {:?}", start.elapsed());
+
+    let start = Instant::now();
+    my_lsm.scan(&0i32.to_be_bytes(), &(n - 1).to_be_bytes()).unwrap();
+    println!("Full range scan : {:?}", start.elapsed());
+
+    let start = Instant::now();
+    for i in 0..n {
+        my_lsm.delete_i32(i).unwrap();
+    }
+    println!("Delete : {:?}", start.elapsed());
+
+    let _ = std::fs::remove_dir_all(&lsm_dir);
+
+    println!("\n===== fjall crate (Standard LSM-Tree) =====");
+    let fjall_dir = std::env::temp_dir().join("trees_main_fjall_bench");
+    let _ = std::fs::remove_dir_all(&fjall_dir);
+
+    let db = fjall::Database::builder(&fjall_dir)
+        .open()
+        .expect("failed to open fjall database");
+    let items = db
+        .keyspace("default", || fjall::KeyspaceCreateOptions::default())
+        .expect("failed to open keyspace");
+
+    let start = Instant::now();
+    for i in 0..n {
+        items.insert(i.to_be_bytes(), format!("value-{i}")).unwrap();
+    }
+    println!("Insert : {:?}", start.elapsed());
+
+    let start = Instant::now();
+    for i in 0..n {
+        std::hint::black_box(items.get(i.to_be_bytes()).unwrap());
+    }
+    println!("Search : {:?}", start.elapsed());
+
+    let start = Instant::now();
+    for item in items.range(0i32.to_be_bytes()..=(n - 1).to_be_bytes()) {
+        std::hint::black_box(item);
+    }
+    println!("Full range scan : {:?}", start.elapsed());
+
+    let start = Instant::now();
+    for i in 0..n {
+        items.remove(i.to_be_bytes()).unwrap();
+    }
+    println!("Delete : {:?}", start.elapsed());
+
+    drop(items);
+    drop(db);
+    let _ = std::fs::remove_dir_all(&fjall_dir);
 }
