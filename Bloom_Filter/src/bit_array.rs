@@ -28,6 +28,14 @@ impl BitArray {
 
         self.bits[word_idx] &= !(1u64 << bit_idx);
     }
+
+    pub fn as_raw_words(&self) -> &[u64] {
+        &self.bits
+    }
+
+    pub fn from_raw_words(bits: Vec<u64>) -> Self {
+        Self { bits }
+    }
 }
 #[cfg(test)]
 mod tests {

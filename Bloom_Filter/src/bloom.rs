@@ -33,6 +33,28 @@ impl<H: Hasher> BloomFilter<H> {
             hasher,
         }
     }
+
+    /// Access the underlying bit array words for serialization.
+    pub fn raw_words(&self) -> &[u64] {
+        self.bits.as_raw_words()
+    }
+
+    /// Reconstructs a BloomFilter from deserialized raw words.
+    pub fn from_raw_words(m: usize, k: usize, r: usize, hasher: H, raw_words: Vec<u64>) -> Self {
+        assert!(m > 0);
+        assert!(k > 0);
+        assert!(r > 0);
+        assert!(m % r == 0);
+
+        Self {
+            bits: BitArray::from_raw_words(raw_words),
+            collisions: BitArray::new(r),
+            m,
+            k,
+            r,
+            hasher,
+        }
+    }
     // Enhanced double hashing:
     // An optimisation referenced from Rocks DB
     // h_i = h1 + i*h2 + i(i-1)/2
