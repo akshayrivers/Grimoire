@@ -1,30 +1,41 @@
-// RSA-2048 (RFC 8017 PKCS #1 v2.2) — keygen, raw trapdoor, PKCS#1 v1.5,
+// RSA-2048 (RFC 8017 PKCS #1 v2.2): keygen, raw trapdoor, PKCS#1 v1.5,
 // OAEP-SHA256, and RSASSA-PKCS1-v1_5-SHA256 sign/verify.
 //
-// Bignum arithmetic delegates to libcrypto (BIGNUM); every RSA step
-// itself — prime selection, e/d derivation, CRT, padding, DigestInfo —
-// is implemented below, not via the high-level RSA_* API.
+// EDUCATIONAL CODE. NOT CONSTANT-TIME, NOT FOR PRODUCTION. The `oracle` mode
+// is intentionally vulnerable. Use OpenSSL's EVP API for real work.
 //
-// Code structure: 
-// 1. BIGNUM Library
-// 2. Mathematical RSA
-// 3. Padding Schemes
-// 4. Encryption / Signature APIs
-// 5. Tests
-
+// From libcrypto: BIGNUM arithmetic (incl. mod-exp / mod-inverse), prime
+// generation (BN_generate_prime_ex), SHA-256, RAND_bytes.
+// Written here: choosing p, q for e = 65537, n / z / d, CRT params and CRT
+// decryption, I2OSP/OS2IP, PKCS#1 v1.5 and OAEP (incl. MGF1), and v1.5
+// signatures with DigestInfo. The high-level RSA_* API is not used.
+//
+// Lab simplification: one key pair is reused for encryption and signing.
+// RFC 8017 recommends one scheme per key.
+//
+// Code structure:
+// 1. BIGNUM helpers  2. Mathematical RSA  3. Padding  4. Sign/verify
+// 5. Self-tests      6. Attack-lab harness (oracle / v15-encrypt)
+//
 // Build (Apple Silicon, Homebrew OpenSSL 3):
 //   g++ -std=c++17 -O2 -Wall -Wextra -o rsa RSA.cpp \
 //       -I/opt/homebrew/opt/openssl@3/include \
 //       -L/opt/homebrew/opt/openssl@3/lib -lcrypto
+// Build (Linux):
+//   g++ -std=c++17 -O2 -Wall -Wextra -o rsa RSA.cpp -lcrypto
 // Usage:
-//   ./rsa                       -> self-tests (generates a fresh 2048-bit key)
-//   ./rsa keygen [bits]         -> labeled hex: n e d p q dp dq qinv
-//   ./rsa raw-enc <n> <e> <m>   -> hex ciphertext (all hex)
-//   ./rsa raw-dec <n> <d> <c>   -> hex plaintext
+//   ./rsa                                -> self-tests (fresh 2048-bit key)
+//   ./rsa keygen [bits]                  -> labeled hex: n e d p q dp dq qinv
+//   ./rsa raw-enc <n> <e> <m>            -> hex ciphertext (all hex)
+//   ./rsa raw-dec <n> <d> <c>            -> hex plaintext
+//   ./rsa v15-encrypt <n> <e> <msg_hex>  -> hex ciphertext, PKCS#1 v1.5
+//   ./rsa oracle <n> <d> <p> <q> <dp> <dq> <qinv> [--strict]
+//        reads hex ciphertexts from stdin, prints 1/0 per line (valid v1.5
+//        padding or not). The vulnerable "server" for bleichenbacher.py.
 //
-// Interop (raw, no padding):
-//   python3 -c "print(pow(65,17,3233))"            # == 2790 (textbook KAT below)
-//   ./rsa raw-enc c81... <e> <m>  <->  python3 pow(m,e,n)
+// Interop (raw, no padding), with n, e, m as hex strings:
+//   ./rsa raw-enc <n> <e> <m>   <->   python3 -c "print(hex(pow(m, e, n)))"
+//   Textbook KAT: pow(65, 17, 3233) == 2790
 
 #include <openssl/bn.h>
 #include <openssl/crypto.h>
@@ -38,6 +49,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 namespace rsa {
 
@@ -122,43 +134,69 @@ Key keygen(int bits = 2048, unsigned e_word = kDefaultE) {
     // Rejection-sample primes with gcd(p-1, e) = 1 (BN_mod_inverse needs it).
     // With prime e=65537 this is just (p-1) % e != 0; probability of a hit is ~2^-16.
     for (;;) {
-        // generate p and q
+        // Generate p
         auto p = make_bn();
         if (!BN_generate_prime_ex(p.get(), bits / 2, 0, nullptr, nullptr, nullptr))
             throw std::runtime_error("prime gen (p) failed");
         if (BN_mod_word(p.get(), e_word) == 1) continue;
+
+        // Generate q
         auto q = make_bn();
         if (!BN_generate_prime_ex(q.get(), bits / 2, 0, nullptr, nullptr, nullptr))
             throw std::runtime_error("prime gen (q) failed");
         if (BN_mod_word(q.get(), e_word) == 1) continue;
         if (BN_cmp(p.get(), q.get()) == 0) continue;
+
+        // Compute n and ensure it is exactly `bits` bits.
+        // (BN_generate_prime_ex only guarantees the TOP bit of each prime is
+        // set, not the second one, so p*q lands one bit short about half the
+        // time. Retry the whole pair rather than silently handing out a
+        // weaker key.)
+        auto n = make_bn();
+        if (!BN_mul(n.get(), p.get(), q.get(), ctx.get()))
+            throw std::runtime_error("n failed");
+
+        if (BN_num_bits(n.get()) != bits)
+            continue;
+
         k.p = std::move(p);
         k.q = std::move(q);
+        k.n = std::move(n);
         break;
     }
+
     auto pm1 = make_bn(), qm1 = make_bn(), one = bn_from_word(1);
-    if (!BN_sub(pm1.get(), k.p.get(), one.get()) || !BN_sub(qm1.get(), k.q.get(), one.get()))
+    if (!BN_sub(pm1.get(), k.p.get(), one.get()) ||
+        !BN_sub(qm1.get(), k.q.get(), one.get()))
         throw std::runtime_error("BN_sub failed");
-    auto n = make_bn(), phi = make_bn();
-    if (!BN_mul(n.get(), k.p.get(), k.q.get(), ctx.get())) throw std::runtime_error("n failed");
-    if (!BN_mul(phi.get(), pm1.get(), qm1.get(), ctx.get())) throw std::runtime_error("phi failed");
+
+    auto phi = make_bn();
+    if (!BN_mul(phi.get(), pm1.get(), qm1.get(), ctx.get()))
+        throw std::runtime_error("phi failed");
 
     BIGNUM* d_raw = BN_mod_inverse(nullptr, e.get(), phi.get(), ctx.get());
     if (!d_raw) throw std::runtime_error("e not invertible mod phi (retry keygen)");
+
     k.d = BN_ptr(d_raw);
-    k.n = std::move(n);
     k.e = std::move(e);
+
     // CRT params.
     BIGNUM *dp = nullptr, *dq = nullptr, *qi = nullptr;
-    dp = BN_new(); dq = BN_new();
-    if (!dp || !dq || !BN_mod(dp, k.d.get(), pm1.get(), ctx.get()) ||
+    dp = BN_new();
+    dq = BN_new();
+
+    if (!dp || !dq ||
+        !BN_mod(dp, k.d.get(), pm1.get(), ctx.get()) ||
         !BN_mod(dq, k.d.get(), qm1.get(), ctx.get()))
         throw std::runtime_error("CRT dp/dq failed");
+
     qi = BN_mod_inverse(nullptr, k.q.get(), k.p.get(), ctx.get());
     if (!qi) throw std::runtime_error("qinv failed");
+
     k.dp = BN_ptr(dp);
     k.dq = BN_ptr(dq);
     k.qinv = BN_ptr(qi);
+
     return k;
 }
 
@@ -191,12 +229,13 @@ inline BN_ptr raw_decrypt_crt(const BN_ptr& c, const Key& k, BN_CTX* ctx) {
 }
 
 // PKCS#1 v1.5 encryption padding (legacy/compat; NOT CCA-secure, Bleichenbacher Attack)
+// 00 || 02 || Random non-zero bytes || 00 || Message
 std::vector<uint8_t> v15_encode(const std::vector<uint8_t>& msg, size_t k) {
     if (msg.size() + 11 > k) throw std::runtime_error("v1.5: message too long");
     size_t ps_len = k - msg.size() - 3;
     std::vector<uint8_t> em(k);
-    em[0] = 0x00;
-    em[1] = 0x02;
+    em[0] = 0x00;// Zero padding
+    em[1] = 0x02;// public key operation, 0x01 in private key operation
     // PS: nonzero random bytes (zero bytes would terminate the padding early).
     if (RAND_bytes(em.data() + 2, static_cast<int>(ps_len)) != 1)
         throw std::runtime_error("RAND_bytes failed");
@@ -240,7 +279,8 @@ void mgf1_sha256(const uint8_t* seed, size_t seed_len, uint8_t* out, size_t out_
     OPENSSL_cleanse(buf.data(), buf.size());
     OPENSSL_cleanse(d, sizeof d);
 }
-
+// DB = lHash || PS || 01 || M
+// EM = 00 || maskedSeed || maskedDB
 std::vector<uint8_t> oaep_encode_sha256(const std::vector<uint8_t>& msg, size_t k) {
     constexpr size_t hLen = SHA256_DIGEST_LENGTH;
     if (msg.size() + 2 * hLen + 2 > k) throw std::runtime_error("OAEP: message too long");
@@ -301,6 +341,13 @@ std::vector<uint8_t> oaep_decode_sha256(const std::vector<uint8_t>& em, size_t k
 }
 
 // RSASSA-PKCS1-v1_5-SHA256 signatures
+// DER-encoded ASN.1 structure identifying SHA-256.
+// SEQUENCE
+// ├── AlgorithmIdentifier
+// │    ├── OBJECT IDENTIFIER = SHA-256
+// │    └── NULL
+// └── OCTET STRING containing SHA-256 digest
+
 constexpr uint8_t kSha256DigestInfoPrefix[19] = {0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60,
                                                 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
                                                 0x01, 0x05, 0x00, 0x04, 0x20};
@@ -311,7 +358,19 @@ bool secure_equal(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) 
     for (size_t i = 0; i < a.size(); ++i) d |= (a[i] ^ b[i]);
     return d == 0;
 }
-
+/**
+    os2ip(em)
+        ↓
+    integer
+        ↓
+    RSA private operation
+        ↓
+    EM^d mod n
+        ↓
+    i2osp()
+        ↓
+    256-byte signature 
+*/
 std::vector<uint8_t> sign_v15_sha256(const std::vector<uint8_t>& msg, const Key& k, BN_CTX* ctx) {
     size_t kk = k_bytes(k);
     uint8_t h[SHA256_DIGEST_LENGTH];
@@ -321,7 +380,7 @@ std::vector<uint8_t> sign_v15_sha256(const std::vector<uint8_t>& msg, const Key&
     if (kk < t.size() + 11) throw std::runtime_error("sign: key too small");
     std::vector<uint8_t> em(kk, 0);
     em[0] = 0x00;
-    em[1] = 0x01;
+    em[1] = 0x01;// signed padding
     size_t ps_len = kk - t.size() - 3;
     std::fill(em.begin() + 2, em.begin() + 2 + ps_len, 0xFF);
     em[2 + ps_len] = 0x00;
@@ -412,7 +471,7 @@ static int run_selftests() {
         t.d = bn_from_word(2753);
         t.p = bn_from_word(61);
         t.q = bn_from_word(53);
-        t.dp = bn_from_word(53 % 60);  // d mod (p-1) = 2753 mod 60 = 53
+        t.dp = bn_from_word(2753 % 60);  // d mod (p-1) = 2753 mod 60 = 53
         t.dq = bn_from_word(2753 % 52);  // d mod (q-1) = 2753 mod 52 = 49
         t.qinv = bn_from_word(38);       // q^-1 mod p = 53^-1 mod 61 = 38
         auto m = bn_from_word(65);
@@ -518,6 +577,10 @@ static int run_selftests() {
     return fails ? 1 : 0;
 }
 
+// attack-lab harness
+// These two modes exist only so the Bleichenbacher post's Python driver can
+// talk to our REAL raw_decrypt_crt / v15_encode / v15_decode, instead of a
+
 int main(int argc, char** argv) {
     using namespace rsa;
     std::string mode = argc > 1 ? argv[1] : "selftest";
@@ -561,9 +624,156 @@ int main(int argc, char** argv) {
             std::cout << to_hex(out) << "\n";
             return 0;
         }
+        // v15-encrypt: build a REAL PKCS#1 v1.5 ciphertext for a message,
+        // using the PUBLIC key only (v15_encode + raw_encrypt, unmodified).
+        // This is exactly what the Mage would send Manglu.
+        if (mode == "v15-encrypt" && argc == 5) {
+            CTX_ptr ctx(BN_CTX_new());
+            Key k;
+            k.n = bn_from_hex(argv[2]);
+            k.e = bn_from_hex(argv[3]);
+            std::vector<uint8_t> msg = from_hex(argv[4]);
+            size_t kk = k_bytes(k);
+            auto em = v15_encode(msg, kk);
+            auto c = raw_encrypt(os2ip(em), k, ctx.get());
+            std::cout << to_hex(i2osp(c.get(), kk)) << "\n";
+            return 0;
+        }
+        // oracle: THE VULNERABLE SERVER for the Bleichenbacher lab.
+        // Reads one hex ciphertext per line from stdin, decrypts with the
+        // PRIVATE key via the real raw_decrypt_crt (CRT path — same as a real
+        // server would use for speed), and reports whether the PKCS#1 v1.5
+        // padding looked valid. Nothing else is revealed.
+        //   oracle <n> <d> <p> <q> <dp> <dq> <qinv> [--strict]
+        // stdout, one line per query: "1" (valid) or "0" (invalid).
+        // default = "weak": only checks em[0]==0x00 && em[1]==0x02 (a common
+        //   real-world shortcut some servers actually take).
+        // strict: runs the real v15_decode (header AND separator).
+        if (mode == "oracle" && argc >= 9) {
+            CTX_ptr ctx(BN_CTX_new());
+            Key k;
+            k.n = bn_from_hex(argv[2]);
+            k.d = bn_from_hex(argv[3]);
+            k.p = bn_from_hex(argv[4]);
+            k.q = bn_from_hex(argv[5]);
+            k.dp = bn_from_hex(argv[6]);
+            k.dq = bn_from_hex(argv[7]);
+            k.qinv = bn_from_hex(argv[8]);
+            bool strict = argc > 9 && std::string(argv[9]) == "--strict";
+            size_t kk = k_bytes(k);
+
+            std::ios::sync_with_stdio(false);
+            std::string line;
+            while (std::getline(std::cin, line)) {
+                if (line.empty()) continue;
+                bool ok = false;
+                try {
+                    auto cb = from_hex(line);
+                    auto c = bn_from_bytes(cb.data(), cb.size());
+                    auto m = raw_decrypt_crt(c, k, ctx.get());
+                    auto em = i2osp(m.get(), kk);
+                    if (strict) {
+                        try { v15_decode(em); ok = true; } catch (...) { ok = false; }
+                    } else {
+                        ok = (em[0] == 0x00 && em[1] == 0x02);
+                    }
+                } catch (...) {
+                    ok = false;
+                }
+                std::cout << (ok ? '1' : '0') << '\n';
+                std::cout.flush();
+            }
+            return 0;
+        }
+        // time-v15 / time-oaep: TIMING HARNESS for Section 5.
+        // Measures v15_decode / oaep_decode_sha256 IN ISOLATION (no RSA
+        // exponentiation involved) so the microsecond-scale branch/early-exit
+        // signal isn't buried under the ~millisecond-scale BN_mod_exp cost a
+        // full decrypt would add. Emits raw per-call timings as CSV:
+        //   category,nanoseconds
+        // to stdout, one line per trial, for the Python side to analyze.
+        if (mode == "time-v15" && argc == 4) {
+            size_t kk = static_cast<size_t>(std::stoul(argv[2]));
+            int iters = std::stoi(argv[3]);
+            std::vector<uint8_t> msg = {'h', 'i'};
+
+            auto make_valid = [&]() { return v15_encode(msg, kk); };
+            auto make_bad_header = [&]() {
+                auto em = v15_encode(msg, kk);
+                em[1] = 0x00;  // fails on the very first check, no scan at all
+                return em;
+            };
+            auto make_bad_late = [&]() {
+                // 00 02 header (passes), then every remaining byte forced
+                // non-zero, so the separator scan runs to the very end
+                // before failing — the slowest possible reject.
+                std::vector<uint8_t> em(kk, 0x01);
+                em[0] = 0x00;
+                em[1] = 0x02;
+                return em;
+            };
+
+            std::cout << "category,ns\n";
+            auto run = [&](const char* label, auto gen) {
+                for (int i = 0; i < iters; ++i) {
+                    auto em = gen();
+                    auto t0 = std::chrono::steady_clock::now();
+                    try { v15_decode(em); } catch (...) {}
+                    auto t1 = std::chrono::steady_clock::now();
+                    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+                    std::cout << label << ',' << ns << '\n';
+                }
+            };
+            run("valid", make_valid);
+            run("bad_header", make_bad_header);
+            run("bad_late_separator", make_bad_late);
+            return 0;
+        }
+        if (mode == "time-oaep" && argc == 4) {
+            size_t kk = static_cast<size_t>(std::stoul(argv[2]));
+            int iters = std::stoi(argv[3]);
+            std::vector<uint8_t> msg = {'h', 'i'};
+            constexpr size_t hLen = 32;
+
+            auto make_valid = [&]() { return oaep_encode_sha256(msg, kk); };
+            auto make_bad_header = [&]() {
+                auto em = oaep_encode_sha256(msg, kk);
+                em[0] = 0xFF;  // fails before either MGF1 call ever runs
+                return em;
+            };
+            auto make_bad_lhash = [&]() {
+                // Valid header, correct length -> BOTH MGF1 unmask rounds
+                // run in full (the expensive part), and only THEN does the
+                // lHash comparison fail (we flip a byte inside maskedDB so
+                // the unmasked lHash comes out wrong).
+                auto em = oaep_encode_sha256(msg, kk);
+                em[1 + hLen] ^= 0xFF;  // corrupt first byte of maskedDB
+                return em;
+            };
+
+            std::cout << "category,ns\n";
+            auto run = [&](const char* label, auto gen) {
+                for (int i = 0; i < iters; ++i) {
+                    auto em = gen();
+                    auto t0 = std::chrono::steady_clock::now();
+                    try { oaep_decode_sha256(em, kk); } catch (...) {}
+                    auto t1 = std::chrono::steady_clock::now();
+                    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+                    std::cout << label << ',' << ns << '\n';
+                }
+            };
+            run("valid", make_valid);
+            run("bad_header", make_bad_header);
+            run("bad_lhash", make_bad_lhash);
+            return 0;
+        }
         std::cerr << "usage:\n  " << argv[0] << " [selftest]\n  " << argv[0]
                   << " keygen [bits]\n  " << argv[0] << " raw-enc <n_hex> <e_hex> <m_hex>\n  "
-                  << argv[0] << " raw-dec <n_hex> <d_hex> <c_hex>\n";
+                  << argv[0] << " raw-dec <n_hex> <d_hex> <c_hex>\n  " << argv[0]
+                  << " v15-encrypt <n_hex> <e_hex> <msg_hex>\n  " << argv[0]
+                  << " oracle <n> <d> <p> <q> <dp> <dq> <qinv> [--strict]  (reads ciphertexts from stdin)\n  "
+                  << argv[0] << " time-v15 <k_bytes> <iterations>\n  " << argv[0]
+                  << " time-oaep <k_bytes> <iterations>\n";
         return 2;
     } catch (const std::exception& ex) {
         std::cerr << "error: " << ex.what() << "\n";

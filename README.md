@@ -9,16 +9,22 @@ A collection of algorithms, data structures, and interesting computer science co
 ## Trees:
 - [x] B Trees (CLRS) 
 - [x] B+ Trees (CLRS)
-- [ ] LSM(Log structured Merge Tree)
+- [x] LSM(Log structured Merge Tree)
 
 ## Lock Based Concurrent Data Structures
 - [x] Sloppy Counter
 - [x] Hand Over Hand Locking
 - [ ] Concurrent Skip List
-## Hell Tic tac toe
-- [x] Planned
-- [ ] Implementation
-### Bloom Filters
+## Cryptography
+### Symmetric
+- [x] HMAC
+- [ ] Attacks
+### Asymmetric
+- [x] RSA 2048
+- [x] Bleichenbacher Attack
+- [ ] Timing side channels (ongoing + documented)
+
+## Bloom Filters
 - [x] Theory 
 - [x] Implementation
 ## Rope
@@ -27,5 +33,10 @@ A collection of algorithms, data structures, and interesting computer science co
 
 ## DNS Resolver
 Link: [DNS Resolver in Rust](https://github.com/akshayrivers/DNS-Resolver)
+- [x] Theory
+- [x] Implementation
+
+## Memory Allocator
+link: [Memory Allocator](https://github.com/akshayrivers/Memory-Allocator)
 - [x] Theory
 - [x] Implementation
