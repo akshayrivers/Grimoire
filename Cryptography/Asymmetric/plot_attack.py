@@ -1,46 +1,35 @@
 #!/usr/bin/env python3
-"""Plot interval width vs. query count from bleichenbacher.py --csv logs."""
-import csv, sys
-import matplotlib
-matplotlib.use("Agg")
+"""Plot per-trial query counts from bench_results.csv -> bleichenbacher_bench.png"""
+import csv, random, statistics
 import matplotlib.pyplot as plt
 
-def load(path):
-    qs, ws = [], []
-    with open(path) as f:
-        for row in csv.DictReader(f):
-            qs.append(int(row["queries"]))
-            ws.append(int(row["interval_width"]))
-    return qs, ws
+rows = list(csv.DictReader(open("bench_results.csv")))
+modes = (("weak", "#d64545", "weak oracle\n(header 00 02 only)"),
+         ("strict", "#2a6ab5", "strict oracle\n(real v15_decode)"))
+data = {m: [(int(r["queries"]), r["status"] == "capped") for r in rows if r["mode"] == m]
+        for m, _, _ in modes}
 
-def main():
-    files = sys.argv[1:] or ["weak_log.csv", "strict_log.csv"]
-    titles = {"weak_log.csv": "Weak oracle\n(header bytes only: 00 02)",
-              "strict_log.csv": "Strict oracle\n(real v15_decode: header + separator)"}
-    colors = {"weak_log.csv": "#d64545", "strict_log.csv": "#2b6cb0"}
+random.seed(1)
+fig, ax = plt.subplots(figsize=(7.5, 5.5))
+for i, (m, color, _) in enumerate(modes):
+    for q, capped in data[m]:
+        ax.scatter(i + random.uniform(-0.13, 0.13), q, color=color, s=55, alpha=0.85,
+                   marker="^" if capped else "o",
+                   edgecolor="black" if capped else "none")
+    med = statistics.median(q for q, _ in data[m])
+    ax.hlines(med, i - 0.3, i + 0.3, color="black", lw=2)
+    ax.text(i + 0.33, med, f"median {med:,.0f}", va="center", fontsize=9)
 
-    present = [p for p in files if __import__("os").path.exists(p)]
-    fig, axes = plt.subplots(1, len(present), figsize=(6.5 * len(present), 5.2))
-    if len(present) == 1:
-        axes = [axes]
-
-    for ax, path in zip(axes, present):
-        qs, ws = load(path)
-        ax.plot(qs, ws, color=colors.get(path, "#333"), linewidth=1.6)
-        ax.scatter([qs[-1]], [ws[-1]], color=colors.get(path, "#333"), zorder=5, s=30)
-        ax.set_yscale("log")
-        ax.set_xlabel("oracle queries")
-        ax.set_ylabel("candidate-plaintext interval width (log scale)")
-        ax.set_title(f"{titles.get(path, path)}\nfinal: {qs[-1]:,} queries")
-        ax.grid(True, which="both", alpha=0.25)
-        ax.ticklabel_format(axis="x", style="plain")
-
-    fig.suptitle("Bleichenbacher's attack narrowing the plaintext interval\n"
-                  "(against the real compiled RSA.cpp oracle — same key, same message)",
-                  y=1.04)
-    fig.tight_layout()
-    fig.savefig("bleichenbacher_narrowing.png", dpi=160, bbox_inches="tight")
-    print("wrote bleichenbacher_narrowing.png")
-
-if __name__ == "__main__":
-    main()
+n = len(data["weak"])
+ax.set_yscale("log")
+ax.set_xticks([0, 1])
+ax.set_xticklabels([lbl for _, _, lbl in modes])
+ax.set_xlim(-0.6, 1.95)
+ax.set_ylabel("oracle queries to recover the plaintext (log scale)")
+ax.set_title(f"Bleichenbacher against the real RSA.cpp oracle\n"
+             f"{n} runs per oracle, fresh 512-bit key each run "
+             f"(triangle = hit the query cap)", fontsize=10)
+ax.grid(alpha=0.3, axis="y", which="both")
+fig.tight_layout()
+fig.savefig("bleichenbacher_bench.png", dpi=200)
+print("wrote bleichenbacher_bench.png")
